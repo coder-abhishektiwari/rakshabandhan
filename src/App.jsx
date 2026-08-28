@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import Home from './components/Home'
 import Ceremony from './components/Ceremony'
 import ConnectionStatus from './components/ConnectionStatus'
@@ -24,7 +24,7 @@ export default function App() {
 
   const wsRef = useRef(null)
   const pcRef = useRef(null)
-  const mountedRef = useRef(false)
+  const startedRef = useRef(false)
 
   // Check URL on mount
   useEffect(() => {
@@ -40,23 +40,18 @@ export default function App() {
     }
   }, [])
 
-  // Start joining when screen is 'joining'
+  // Start joining - NO cleanup return (connection must persist to ceremony)
   useEffect(() => {
     if (screen !== 'joining' || !roomId || !role) return
-    if (mountedRef.current) return // StrictMode guard
-    mountedRef.current = true
+    if (startedRef.current) return
+    startedRef.current = true
 
     console.log('[APP] Starting join for room:', roomId, 'role:', role)
-
-    let cancelled = false
-    let localPc = null
-    let localWs = null
 
     const ws = createSignaling(
       roomId,
       'sister',
       async (msg, ws) => {
-        if (cancelled) return
         console.log('[APP] Joiner received:', msg.type)
 
         switch (msg.type) {
@@ -68,29 +63,28 @@ export default function App() {
             setJoinStatus('Setting up connection...')
             try {
               const localStream = await getLocalAudio()
-              if (!cancelled) setAudioStream(localStream)
+              setAudioStream(localStream)
 
               const pc = createPeerConnection(
                 (stream) => {
-                  if (!cancelled) setRemoteAudioStream(stream)
+                  setRemoteAudioStream(stream)
                 },
                 () => {},
                 (candidate) => {
                   sendSignaling(ws, 'ice-candidate', candidate)
                 },
                 () => {
-                  if (!cancelled) setJoinStatus('Connected!')
+                  setJoinStatus('Connected!')
                 },
                 () => {
-                  if (!cancelled) setJoinStatus('Connection lost...')
+                  setJoinStatus('Connection lost...')
                 }
               )
-              localPc = pc
               pcRef.current = pc
 
               setupReceiver(pc, localStream, (dc) => {
                 console.log('[APP] DataChannel opened for joiner')
-                if (!cancelled) setDataChannel(dc)
+                setDataChannel(dc)
               })
 
               const answer = await handleOffer(pc, msg.data)
@@ -104,14 +98,14 @@ export default function App() {
           }
 
           case 'answer':
-            if (localPc) {
-              await handleAnswer(localPc, msg.data)
+            if (pcRef.current) {
+              await handleAnswer(pcRef.current, msg.data)
             }
             break
 
           case 'ice-candidate':
-            if (localPc) {
-              await handleIceCandidate(localPc, msg.data)
+            if (pcRef.current) {
+              await handleIceCandidate(pcRef.current, msg.data)
             }
             break
 
@@ -131,25 +125,24 @@ export default function App() {
         }
       },
       (ws) => {
-        localWs = ws
         wsRef.current = ws
       },
       () => {
-        if (!cancelled) setJoinStatus('Connection lost')
+        setJoinStatus('Connection lost')
       }
     )
 
     wsRef.current = ws
-
-    return () => {
-      cancelled = true
-      if (localWs) localWs.close()
-      if (localPc) localPc.close()
-      if (audioStream) {
-        audioStream.getTracks().forEach(t => t.stop())
-      }
-    }
   }, [screen, roomId, role])
+
+  // Cleanup only on actual component unmount
+  useEffect(() => {
+    return () => {
+      console.log('[APP] Unmount cleanup')
+      if (wsRef.current) wsRef.current.close()
+      if (pcRef.current) pcRef.current.close()
+    }
+  }, [])
 
   function handleCreatorRtcReady(pc, dc, localStream, remoteStream) {
     setPeerConnection(pc)
