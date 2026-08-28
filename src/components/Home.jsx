@@ -52,13 +52,15 @@ export default function Home({ onRtcReady }) {
 
   const setupWebRTC = useCallback(async (remoteWs, role) => {
     console.log('[HOME] Setting up WebRTC as', role)
+    let remoteStream = null
+
     try {
       const localStream = await getLocalAudio()
       localStreamRef.current = localStream
 
       const onTrack = (stream) => {
         console.log('[HOME] Got remote track')
-        onRtcReady(pcRef.current, dcRef.current, localStream, stream)
+        remoteStream = stream
       }
 
       const onIce = (candidate) => {
@@ -79,8 +81,9 @@ export default function Home({ onRtcReady }) {
 
       if (role === 'brother') {
         const offer = await setupInitiator(pc, localStream, (dc) => {
-          console.log('[HOME] DataChannel created')
+          console.log('[HOME] DataChannel opened — calling onRtcReady')
           dcRef.current = dc
+          onRtcReady(pcRef.current, dcRef.current, localStream, remoteStream)
         })
         sendSignaling(remoteWs, 'offer', offer)
         console.log('[HOME] Offer sent')
