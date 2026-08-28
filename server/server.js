@@ -24,16 +24,23 @@ function generateRoomId() {
 
 function broadcast(roomId, message, excludeWs = null) {
   const room = rooms.get(roomId);
-  if (!room) return;
+  if (!room) {
+    console.log('[SRV] broadcast: room not found', roomId);
+    return;
+  }
   const data = JSON.stringify(message);
+  let sent = 0;
   for (const participant of room.participants) {
     if (participant.ws !== excludeWs && participant.ws.readyState === 1) {
       participant.ws.send(data);
+      sent++;
     }
   }
+  console.log('[SRV] broadcast:', message.type, 'to', sent, 'participants in room', roomId);
 }
 
 wss.on('connection', (ws) => {
+  console.log('[SRV] New connection');
   let currentRoom = null;
   let currentRole = null;
 
@@ -42,8 +49,11 @@ wss.on('connection', (ws) => {
     try {
       msg = JSON.parse(raw);
     } catch {
+      console.log('[SRV] Invalid JSON received');
       return;
     }
+
+    console.log('[SRV] Received:', msg.type, JSON.stringify(msg));
 
     switch (msg.type) {
       case 'create-room': {
@@ -53,6 +63,7 @@ wss.on('connection', (ws) => {
         rooms.set(roomId, {
           participants: [{ ws, role: 'brother' }]
         });
+        console.log('[SRV] Room created:', roomId);
         ws.send(JSON.stringify({ type: 'room-created', roomId }));
         break;
       }
@@ -61,16 +72,19 @@ wss.on('connection', (ws) => {
         const { roomId } = msg;
         const room = rooms.get(roomId);
         if (!room) {
+          console.log('[SRV] Room not found:', roomId);
           ws.send(JSON.stringify({ type: 'error', message: 'ROOM_NOT_FOUND' }));
           return;
         }
         if (room.participants.length >= 2) {
+          console.log('[SRV] Room full:', roomId);
           ws.send(JSON.stringify({ type: 'error', message: 'ROOM_FULL' }));
           return;
         }
         currentRoom = roomId;
         currentRole = 'sister';
         room.participants.push({ ws, role: 'sister' });
+        console.log('[SRV] Sister joined room:', roomId, '- total:', room.participants.length);
 
         ws.send(JSON.stringify({ type: 'room-joined', roomId }));
         broadcast(roomId, { type: 'peer-joined', role: 'sister' }, ws);
@@ -82,6 +96,8 @@ wss.on('connection', (ws) => {
       case 'ice-candidate': {
         if (currentRoom) {
           broadcast(currentRoom, msg, ws);
+        } else {
+          console.log('[SRV] No room for', msg.type);
         }
         break;
       }
@@ -96,6 +112,7 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    console.log('[SRV] Connection closed, room:', currentRoom, 'role:', currentRole);
     if (currentRoom) {
       const room = rooms.get(currentRoom);
       if (room) {
@@ -103,6 +120,7 @@ wss.on('connection', (ws) => {
         broadcast(currentRoom, { type: 'peer-left', role: currentRole });
         if (room.participants.length === 0) {
           rooms.delete(currentRoom);
+          console.log('[SRV] Room deleted:', currentRoom);
         }
       }
     }
@@ -111,10 +129,8 @@ wss.on('connection', (ws) => {
 
 const PORT = process.env.PORT || 3000;
 
-// Serve static files in production
 app.use(express.static(join(__dirname, '..', 'dist')));
 
-// SPA fallback
 app.get('*', (req, res) => {
   res.sendFile(join(__dirname, '..', 'dist', 'index.html'));
 });

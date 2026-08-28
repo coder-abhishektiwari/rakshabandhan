@@ -3,7 +3,6 @@ import { createSignaling, sendSignaling } from '../lib/signaling'
 import {
   createPeerConnection,
   setupInitiator,
-  setupReceiver,
   handleOffer,
   handleAnswer,
   handleIceCandidate,
@@ -12,7 +11,7 @@ import {
 import ConnectionStatus from './ConnectionStatus'
 
 export default function Home({ onRtcReady }) {
-  const [phase, setPhase] = useState('select') // select | created | joining | waiting | error
+  const [phase, setPhase] = useState('select')
   const [myRole, setMyRole] = useState(null)
   const [roomId, setRoomId] = useState('')
   const [status, setStatus] = useState('')
@@ -28,7 +27,11 @@ export default function Home({ onRtcReady }) {
 
   function copyLink() {
     if (navigator.clipboard) {
-      navigator.clipboard.writeText(shareLink)
+      navigator.clipboard.writeText(shareLink).then(() => {
+        setStatus('Link copied!')
+      }).catch(() => {
+        setStatus('Copy the link manually')
+      })
     }
   }
 
@@ -38,46 +41,54 @@ export default function Home({ onRtcReady }) {
         title: 'Rakhi Room',
         text: 'Come celebrate Raksha Bandhan with me!',
         url: shareLink
-      }).catch(() => {})
+      }).catch(() => {
+        // User cancelled or error
+        copyLink()
+      })
     } else {
       copyLink()
     }
   }
 
   const setupWebRTC = useCallback(async (remoteWs, role) => {
-    const localStream = await getLocalAudio()
-    localStreamRef.current = localStream
+    console.log('[HOME] Setting up WebRTC as', role)
+    try {
+      const localStream = await getLocalAudio()
+      localStreamRef.current = localStream
 
-    const onTrack = (stream) => {
-      onRtcReady(pcRef.current, dcRef.current, localStream, stream)
-    }
+      const onTrack = (stream) => {
+        console.log('[HOME] Got remote track')
+        onRtcReady(pcRef.current, dcRef.current, localStream, stream)
+      }
 
-    const onIce = (candidate) => {
-      sendSignaling(remoteWs, 'ice-candidate', candidate)
-    }
+      const onIce = (candidate) => {
+        sendSignaling(remoteWs, 'ice-candidate', candidate)
+      }
 
-    const onConnected = () => {
-      setStatus('WebRTC Connected 🟢')
-    }
+      const onConnected = () => {
+        console.log('[HOME] WebRTC connected')
+      }
 
-    const onDisconnected = () => {
-      setStatus('Connection lost...')
-    }
+      const onDisconnected = () => {
+        console.log('[HOME] WebRTC disconnected')
+      }
 
-    const pc = createPeerConnection(onTrack, () => {}, onIce, onConnected, onDisconnected)
-    pcRef.current = pc
+      const pc = createPeerConnection(onTrack, () => {}, onIce, onConnected, onDisconnected)
+      pcRef.current = pc
+      console.log('[HOME] PeerConnection created')
 
-    if (role === 'brother') {
-      const offer = await setupInitiator(pc, localStream, (dc) => {
-        dcRef.current = dc
-      })
-      sendSignaling(remoteWs, 'offer', offer)
-      setStatus('Setting up audio...')
-    } else {
-      setupReceiver(pc, localStream, (dc) => {
-        dcRef.current = dc
-      })
-      setStatus('Setting up audio...')
+      if (role === 'brother') {
+        const offer = await setupInitiator(pc, localStream, (dc) => {
+          console.log('[HOME] DataChannel created')
+          dcRef.current = dc
+        })
+        sendSignaling(remoteWs, 'offer', offer)
+        console.log('[HOME] Offer sent')
+        setStatus('Connecting audio...')
+      }
+    } catch (err) {
+      console.error('[HOME] WebRTC setup error:', err)
+      setStatus('Connection error. Try again.')
     }
   }, [onRtcReady])
 
@@ -88,8 +99,9 @@ export default function Home({ onRtcReady }) {
 
     const ws = createSignaling(
       null,
-      'brother', // creator always initiates
+      'brother',
       async (msg, ws) => {
+        console.log('[HOME] Received:', msg.type)
         switch (msg.type) {
           case 'room-created':
             setRoomId(msg.roomId)
@@ -98,12 +110,11 @@ export default function Home({ onRtcReady }) {
 
           case 'peer-joined':
             setPeerConnected(true)
-            setStatus('Sibling joined! Connecting audio...')
+            setStatus('Sibling joined! Connecting...')
             await setupWebRTC(ws, role)
             break
 
           case 'offer':
-            setStatus('Setting up connection...')
             if (pcRef.current) {
               const answer = await handleOffer(pcRef.current, msg.data)
               sendSignaling(ws, 'answer', answer)
@@ -124,12 +135,11 @@ export default function Home({ onRtcReady }) {
 
           case 'peer-left':
             setPeerConnected(false)
-            setStatus('Disconnected')
+            setStatus('Sibling disconnected')
             break
 
           case 'error':
             setStatus('Error: ' + msg.message)
-            setPhase('error')
             break
         }
       },
@@ -137,7 +147,7 @@ export default function Home({ onRtcReady }) {
         wsRef.current = ws
       },
       () => {
-        setStatus('WebSocket disconnected')
+        setStatus('Connection lost')
       }
     )
 
@@ -150,14 +160,31 @@ export default function Home({ onRtcReady }) {
     setRoomId('')
     setStatus('')
     setPeerConnected(false)
-    if (wsRef.current) wsRef.current.close()
-    if (pcRef.current) pcRef.current.close()
+    if (wsRef.current) {
+      wsRef.current.close()
+      wsRef.current = null
+    }
+    if (pcRef.current) {
+      pcRef.current.close()
+      pcRef.current = null
+    }
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(t => t.stop())
+      localStreamRef.current = null
     }
   }
 
-  // Phase 1: Role Selection
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (wsRef.current) wsRef.current.close()
+      if (pcRef.current) pcRef.current.close()
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(t => t.stop())
+      }
+    }
+  }, [])
+
   if (phase === 'select') {
     return (
       <div className="home">
@@ -195,7 +222,6 @@ export default function Home({ onRtcReady }) {
     )
   }
 
-  // Phase 2: Room Created - Show share link
   if (phase === 'created') {
     return (
       <div className="home">
@@ -259,7 +285,6 @@ export default function Home({ onRtcReady }) {
     )
   }
 
-  // Phase: Error
   return (
     <div className="home">
       <div className="home-card">
